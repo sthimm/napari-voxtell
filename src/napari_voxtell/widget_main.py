@@ -1,7 +1,6 @@
 import os
 import torch
 from typing import Optional
-import SimpleITK as sitk
 
 import numpy as np
 from napari.viewer import Viewer
@@ -13,6 +12,7 @@ from huggingface_hub import snapshot_download
 from napari_voxtell.widget_gui import VoxtellGUI
 
 from voxtell.inference.predictor import VoxTellPredictor
+from voxtell.inference.predict_from_raw_data import get_reader_writer
 
 
 class InitializationThread(QThread):
@@ -29,10 +29,7 @@ class InitializationThread(QThread):
     def run(self):
         """Initialize the model in a separate thread."""
         try:
-            predictor = VoxTellPredictor(
-                model_dir=self.model_dir,
-                device=self.device
-            )
+            predictor = VoxTellPredictor(model_dir=self.model_dir, device=self.device)
             self.finished.emit(predictor)
         except Exception as e:
             self.error.emit(str(e))
@@ -54,8 +51,7 @@ class ProcessingThread(QThread):
         """Run the processing in a separate thread."""
         try:
             voxtell_seg = self.predictor.predict_single_image(
-                self.image_data, 
-                self.text_prompts
+                self.image_data, self.text_prompts
             ).astype(np.uint8)[0]
             self.finished.emit(voxtell_seg)
         except Exception as e:
@@ -124,8 +120,10 @@ class VoxtellWidget(VoxtellGUI):
                 show_error(f"Unknown model selected: {selected_model}")
                 return
             if selected_model == "voxtell_v1.0":
-                show_warning("VoxTell v1.0 is deprecated. Please use v1.1 for better performance and features.")
-            
+                show_warning(
+                    "VoxTell v1.0 is deprecated. Please use v1.1 for better performance and features."
+                )
+
             repo_id = "mrokuss/VoxTell"
             dowload_path = snapshot_download(
                 repo_id=repo_id, allow_patterns=[f"{selected_model}/*", "*.json"]
@@ -142,7 +140,7 @@ class VoxtellWidget(VoxtellGUI):
         self._start_processing("Initializing model...")
 
         # Create device
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"Initializing model on {device}...")
 
         # Create and start the initialization thread
@@ -153,7 +151,7 @@ class VoxtellWidget(VoxtellGUI):
 
     def _on_initialization_finished(self, predictor):
         """Handle successful model initialization."""
-        
+
         self.predictor = predictor
         self._stop_processing("✓ Model initialized!", restore_submit=True)
         self._lock_session()
@@ -162,7 +160,7 @@ class VoxtellWidget(VoxtellGUI):
     def _on_initialization_error(self, error_message):
         """Handle model initialization error."""
         from napari.utils.notifications import show_error
-        
+
         self._stop_processing("✗ Initialization failed!", restore_submit=False)
         show_error(f"Failed to initialize model: {error_message}")
 
@@ -193,34 +191,21 @@ class VoxtellWidget(VoxtellGUI):
         # Get the image properties
         image_data = image_layer.data
 
-        # Reorient the image to RAS using SimpleITK
-        original_orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(image_layer.metadata["direction"].flatten())
-        itk_image = sitk.GetImageFromArray(image_data)
-        itk_image.SetDirection(image_layer.metadata["direction"].flatten())
-        itk_image = sitk.DICOMOrient(itk_image, "RAS")
-        image_data = sitk.GetArrayFromImage(itk_image)
-
         # Start processing animation
         self._start_processing("Segmenting...")
 
         # Create and start the processing thread
         self.processing_thread = ProcessingThread(self.predictor, image_data, text)
         self.processing_thread.finished.connect(
-            lambda mask: self._on_processing_finished(mask, image_layer, text, original_orientation)
+            lambda mask: self._on_processing_finished(mask, image_layer, text)
         )
         self.processing_thread.error.connect(self._on_processing_error)
         self.processing_thread.start()
 
-    def _on_processing_finished(self, mask, image_layer, text, original_orientation):
+    def _on_processing_finished(self, mask, image_layer, text):
         """Handle the completion of processing."""
         # Stop processing animation
         self._stop_processing("✓ Segmentation complete!")
-
-        # Reorient the mask back to the original orientation
-        itk_mask = sitk.GetImageFromArray(mask)
-        itk_mask.SetDirection((-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0))  # RAS direction
-        itk_mask = sitk.DICOMOrient(itk_mask, original_orientation)
-        mask = sitk.GetArrayFromImage(itk_mask)
 
         # Create a new labels layer for each submission with unique name
         self.mask_counter += 1
@@ -243,6 +228,6 @@ class VoxtellWidget(VoxtellGUI):
 
     def _on_processing_error(self, error_message):
         """Handle segmentation processing error."""
-        
+
         self._stop_processing("✗ Segmentation failed!")
         show_error(f"Segmentation failed: {error_message}")
